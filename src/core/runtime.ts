@@ -12,6 +12,7 @@ export interface GenerationProgress {
   chars: number;
   reasoningChars: number;
   startedAt: number;
+  source?: 'app' | 'mount';
 }
 import {
   buildAppGenerationMessages,
@@ -41,12 +42,6 @@ function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
-function stripScriptsForPreview(html: string): string {
-  return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
-    .replace(/<script\b[^>]*>[\s\S]*$/gi, '');
-}
-
 function executeEmbeddedScripts(doc: Document, container: Element): void {
   const scripts = Array.from(container.querySelectorAll('script'));
   for (const oldScript of scripts) {
@@ -61,6 +56,7 @@ function executeEmbeddedScripts(doc: Document, container: Element): void {
 
 class AppRuntimeManager {
   private appControllers = new Map<string, Set<AbortController>>();
+  private activeMountCount = new Map<string, number>();
   private progressMap = new Map<string, GenerationProgress>();
   private progressListeners = new Set<(appId: string, progress: GenerationProgress | null) => void>();
 
@@ -109,11 +105,14 @@ class AppRuntimeManager {
 
   abortGeneration(appId: string): void {
     const set = this.appControllers.get(appId);
-    if (!set) return;
-    for (const ctrl of set) {
-      ctrl.abort();
+    if (set) {
+      for (const ctrl of set) {
+        ctrl.abort();
+      }
+      this.appControllers.delete(appId);
     }
-    this.appControllers.delete(appId);
+    this.activeMountCount.delete(appId);
+    this.emitProgress(appId, null);
   }
 
   private createBridge(appId: string, iframe: HTMLIFrameElement): GuestBridge {
@@ -148,17 +147,38 @@ class AppRuntimeManager {
     const ctrl = this.registerController(appId);
     const stripper = new StreamFenceStripper();
     let accumulated = '';
-    let rafPending = false;
+    let released = false;
 
-    const schedulePreview = () => {
-      if (rafPending) return;
-      rafPending = true;
-      requestAnimationFrame(() => {
-        rafPending = false;
-        if (!ctrl.signal.aborted) {
-          req.onChunk(accumulated);
+    const currentCount = (this.activeMountCount.get(appId) ?? 0) + 1;
+    this.activeMountCount.set(appId, currentCount);
+
+    const progress: GenerationProgress = {
+      phase: 'connecting',
+      chars: 0,
+      reasoningChars: 0,
+      startedAt: Date.now(),
+      source: 'mount',
+    };
+    let lastEmitTime = Date.now();
+    const shouldEmitMountProgress = () => osState.apps.get(appId)?.status !== 'generating';
+
+    if (shouldEmitMountProgress()) {
+      this.emitProgress(appId, progress);
+    }
+
+    const finishMount = () => {
+      if (released) return;
+      released = true;
+      this.releaseController(appId, ctrl);
+      const nextCount = (this.activeMountCount.get(appId) ?? 1) - 1;
+      if (nextCount <= 0) {
+        this.activeMountCount.delete(appId);
+        if (shouldEmitMountProgress()) {
+          this.emitProgress(appId, null);
         }
-      });
+      } else {
+        this.activeMountCount.set(appId, nextCount);
+      }
     };
 
     const messages = buildMountMessages({
@@ -173,11 +193,34 @@ class AppRuntimeManager {
 
     streamChatCompletion(osState.llmConfig, messages, {
       signal: ctrl.signal,
+      onReasoningToken: (token) => {
+        progress.reasoningChars += token.length;
+        if (!shouldEmitMountProgress()) return;
+        const now = Date.now();
+        if (progress.phase === 'connecting') {
+          progress.phase = 'thinking';
+          lastEmitTime = now;
+          this.emitProgress(appId, progress);
+        } else if (now - lastEmitTime >= 100) {
+          lastEmitTime = now;
+          this.emitProgress(appId, progress);
+        }
+      },
       onToken: (token) => {
         const clean = stripper.push(token);
         if (clean) {
           accumulated += clean;
-          schedulePreview();
+          progress.chars = accumulated.length;
+          if (!shouldEmitMountProgress()) return;
+          const now = Date.now();
+          if (progress.phase !== 'streaming') {
+            progress.phase = 'streaming';
+            lastEmitTime = now;
+            this.emitProgress(appId, progress);
+          } else if (now - lastEmitTime >= 100) {
+            lastEmitTime = now;
+            this.emitProgress(appId, progress);
+          }
         }
       },
     })
@@ -194,12 +237,12 @@ class AppRuntimeManager {
         req.onError(msg);
       })
       .finally(() => {
-        this.releaseController(appId, ctrl);
+        finishMount();
       });
 
     return () => {
       ctrl.abort();
-      this.releaseController(appId, ctrl);
+      finishMount();
     };
   }
 
@@ -251,6 +294,7 @@ class AppRuntimeManager {
       chars: 0,
       reasoningChars: 0,
       startedAt: Date.now(),
+      source: 'app',
     };
     let lastEmitTime = Date.now();
     this.emitProgress(app.id, progress);
@@ -420,18 +464,6 @@ class AppRuntimeManager {
     const stripper = new StreamFenceStripper();
     let accumulated = '';
     let targetChecked = false;
-    let rafPending = false;
-
-    const renderPreview = () => {
-      if (rafPending) return;
-      rafPending = true;
-      requestAnimationFrame(() => {
-        rafPending = false;
-        if (!ctrl.signal.aborted) {
-          host.innerHTML = stripScriptsForPreview(accumulated);
-        }
-      });
-    };
 
     const messages = buildExtendFeatureMessages({
       appName: app.name,
@@ -457,7 +489,6 @@ class AppRuntimeManager {
                 }
               }
             }
-            renderPreview();
           }
         },
       });

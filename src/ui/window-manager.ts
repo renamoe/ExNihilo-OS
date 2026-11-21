@@ -33,7 +33,7 @@ interface ManagedWindowDom {
   loaderPhraseEl: HTMLElement;
   loaderMetaEl: HTMLElement;
   loaderMode: 'hidden' | 'full' | 'pill';
-  loaderKind: 'generate' | 'extend' | null;
+  loaderKind: 'generate' | 'mount' | 'extend' | null;
   loaderStartedAt: number;
   spinnerFrame: number;
   currentPhrase: string;
@@ -193,6 +193,16 @@ export class WindowManager {
       return;
     }
     const phase = dom.lastProgress?.phase;
+    if (dom.loaderKind === 'mount') {
+      if (phase === 'thinking') {
+        dom.loaderMetaEl.textContent = `深度思考中 · ${elapsed}s`;
+      } else if (phase === 'streaming') {
+        dom.loaderMetaEl.textContent = `加载内容 · ${dom.lastProgress?.chars ?? 0} 字符 · ${elapsed}s`;
+      } else {
+        dom.loaderMetaEl.textContent = `连接模型 · ${elapsed}s`;
+      }
+      return;
+    }
     if (phase === 'thinking') {
       dom.loaderMetaEl.textContent = `深度思考中 · ${elapsed}s`;
     } else if (phase === 'streaming') {
@@ -209,12 +219,15 @@ export class WindowManager {
     progress: GenerationProgress | null,
   ): void {
     let nextMode: 'hidden' | 'full' | 'pill' = 'hidden';
-    let nextKind: 'generate' | 'extend' | null = null;
+    let nextKind: 'generate' | 'mount' | 'extend' | null = null;
     if (app.status === 'generating') {
       nextKind = 'generate';
-      nextMode = progress?.phase === 'streaming' ? 'pill' : 'full';
+      nextMode = 'full';
     } else if (win.extending) {
       nextKind = 'extend';
+      nextMode = 'pill';
+    } else if (progress?.source === 'mount') {
+      nextKind = 'mount';
       nextMode = 'pill';
     }
 

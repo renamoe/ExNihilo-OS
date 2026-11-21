@@ -34,6 +34,7 @@ describe('buildMountMessages', () => {
 
     expect(systemPrompt).toContain('现有条目 HTML 模板');
     expect(systemPrompt).toContain('严禁生成不能点击的死按钮');
+    expect(systemPrompt).toContain('data-en-back="#');
     expect(userPrompt).toContain('挂载模式: append');
     expect(userPrompt).toContain(sampleHtml);
     expect(userPrompt).toContain('A'.repeat(900));

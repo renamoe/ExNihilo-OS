@@ -7,6 +7,7 @@ const COMPONENT_CATALOG = `
 - 懒挂载 <en-mount>（trigger="click|visible|submit" mode="replace|append" target="#sel" label="" placeholder=""）:
   1. 包裹可点击元素（推荐）：<en-mount trigger="click" mode="replace" target="#view" prompt="..."><en-button>科技</en-button></en-mount>（直接点击内部按钮/卡片/列表项即可触发生成，不会出现多余虚线框）
   2. 独立触发按钮（仅用于「加载更多」「查看评论」等明确扩展入口）：<en-mount trigger="click" mode="append" target="#list" label="加载更多" prompt="..."></en-mount>
+  3. 零请求返回/前进（直接复用历史快照，绝不重新生成）：<en-button variant="ghost" data-en-back="#view">← 返回</en-button> / <en-button variant="ghost" data-en-forward="#view">前进 →</en-button>
 - 虚构媒体 (禁外部URL与fetch): <en-media kind="illustration|photo|chart|map|code" prompt="" caption="">、<en-avatar name="">、<en-video title="" prompt="" duration="02:30" subtitles="句1|句2">、<en-audio title="" artist="" mood="ambient|lofi|synth" duration="02:30">
 `.trim();
 
@@ -107,6 +108,7 @@ export function buildMountMessages(params: {
 2. 严禁外部 URL 与 fetch()，媒体全部用 en-* Fake Media 组件编造；需要继续展开处可嵌套 <en-mount>。
 3. 所有新增的可点击按钮/导航/条目必须直接用 <en-mount trigger="click" ...>原元素</en-mount> 包裹（或绑定极简交互），严禁生成不能点击的死按钮或「点击生成第一项」类元按钮。
 4. 若为 append 模式或给出了「现有条目 HTML 模板」，必须严格复用与模板一致的 HTML 标签、组件属性与样式，只输出新增条目本身（不要重复包裹外层列表/网格容器，也不要重复已有条目内容）。
+5. 子页面/详情页里的「返回」按钮必须使用 data-en-back="#目标容器ID"（如 <en-button variant="ghost" data-en-back="#view">← 返回</en-button>），禁止用 <en-mount> 重新生成父页面。
 
 ${COMPONENT_CATALOG}`,
     },

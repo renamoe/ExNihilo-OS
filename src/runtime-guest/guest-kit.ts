@@ -1,4 +1,8 @@
-import { hasVisibleHtmlContent } from '../core/loading-phrases';
+import {
+  isBackNavigationIntent,
+  MountResultCache,
+  TargetHistoryManager,
+} from './mount-history';
 
 export interface GuestMountRequest {
   prompt: string;
@@ -6,7 +10,7 @@ export interface GuestMountRequest {
   contextSnippet: string;
   mode?: string;
   targetSampleHtml?: string;
-  onChunk: (htmlSoFar: string) => void;
+  onChunk?: (htmlSoFar: string) => void;
   onDone: (finalHtml: string) => void;
   onError: (err: string) => void;
 }
@@ -200,13 +204,81 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
     // ignore if non-configurable
   }
 
-  // 1b. Prevent <a> navigation inside sandboxed iframe
-  doc.addEventListener('click', (e) => {
-    const target = e.target as Element | null;
-    if (target?.closest?.('a[href]')) {
-      e.preventDefault();
+  const activeTargetCancels = new WeakMap<Element, () => void>();
+  const targetHistory = new TargetHistoryManager<Element>(10);
+  const mountCache = new MountResultCache(20);
+  const guardedImgs = new WeakSet<HTMLImageElement>();
+
+  const restoreTargetHtml = (targetEl: Element, html: string) => {
+    const prevCancel = activeTargetCancels.get(targetEl);
+    if (prevCancel) {
+      prevCancel();
+      activeTargetCancels.delete(targetEl);
     }
-  });
+    targetEl.innerHTML = html;
+    executeEmbeddedScripts(doc, targetEl);
+    doc.dispatchEvent(new win.CustomEvent('en-visibility-refresh'));
+    bridge.persistDom();
+  };
+
+  const resolveHistoryTarget = (triggerEl: Element, attrValue: string | null): Element | null => {
+    const sel = attrValue?.trim() || '';
+    if (sel && sel !== 'true') {
+      return doc.querySelector(sel);
+    }
+    let cur: Element | null = triggerEl.parentElement;
+    while (cur && cur !== doc.body) {
+      if (targetHistory.canGoBack(cur) || targetHistory.canGoForward(cur)) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return null;
+  };
+
+  // 1b. Handle declarative back/forward history & prevent <a> navigation inside sandboxed iframe
+  doc.addEventListener(
+    'click',
+    (e) => {
+      const target = e.target as Element | null;
+      const backTrigger = target?.closest?.('[data-en-back]');
+      if (backTrigger) {
+        const targetEl = resolveHistoryTarget(
+          backTrigger,
+          backTrigger.getAttribute('data-en-back'),
+        );
+        if (targetEl) {
+          const prevHtml = targetHistory.goBack(targetEl, targetEl.innerHTML);
+          if (prevHtml !== null) {
+            e.preventDefault();
+            e.stopPropagation();
+            restoreTargetHtml(targetEl, prevHtml);
+            return;
+          }
+        }
+      }
+      const forwardTrigger = target?.closest?.('[data-en-forward]');
+      if (forwardTrigger) {
+        const targetEl = resolveHistoryTarget(
+          forwardTrigger,
+          forwardTrigger.getAttribute('data-en-forward'),
+        );
+        if (targetEl) {
+          const nextHtml = targetHistory.goForward(targetEl, targetEl.innerHTML);
+          if (nextHtml !== null) {
+            e.preventDefault();
+            e.stopPropagation();
+            restoreTargetHtml(targetEl, nextHtml);
+            return;
+          }
+        }
+      }
+      if (target?.closest?.('a[href]')) {
+        e.preventDefault();
+      }
+    },
+    true,
+  );
 
   // 2. Stray <img> guard (external URLs or broken images -> deterministic Fake Media SVG)
   const sanitizeImg = (img: HTMLImageElement) => {
@@ -214,8 +286,8 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
     if (!src || /^(https?:)?\/\//i.test(src)) {
       img.setAttribute('src', buildFakeImgDataUri(img.alt || src || 'ExNihilo Image'));
     }
-    if (!img.dataset.enGuarded) {
-      img.dataset.enGuarded = '1';
+    if (!guardedImgs.has(img)) {
+      guardedImgs.add(img);
       img.addEventListener('error', () => {
         if (!img.src.startsWith('data:image/svg+xml')) {
           img.src = buildFakeImgDataUri(img.alt || 'ExNihilo Media');
@@ -1696,18 +1768,17 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
   );
 
   // --- <en-mount> Declarative AI Mount Protocol ---
-  const activeTargetCancels = new WeakMap<Element, () => void>();
-
   defineOnce(
     'en-mount',
     class extends BaseHTMLElement {
       static get observedAttributes() {
-        return ['prompt', 'trigger', 'mode', 'target', 'label', 'placeholder', 'status'];
+        return ['prompt', 'trigger', 'mode', 'target', 'label', 'placeholder', 'status', 'action'];
       }
       private uiEl!: HTMLElement;
       private streamEl!: HTMLElement;
       private cancelActive: (() => void) | null = null;
       private detachedBySelfReplace = false;
+      private clickBound = false;
       private io: IntersectionObserver | null = null;
       private visibilityHandler = () => this.checkAutoTrigger();
 
@@ -1827,7 +1898,10 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
       }
 
       connectedCallback() {
-        if (!this.getAttribute('status')) {
+        if (
+          !this.getAttribute('status') ||
+          (this.getAttribute('status') === 'loading' && !this.cancelActive)
+        ) {
           this.setAttribute('status', 'idle');
         }
         this.renderUi();
@@ -1961,8 +2035,8 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           if (hasSlottedChildren) {
             this.uiEl.innerHTML = '';
             this.classList.add('click-slot');
-            if (!this.dataset.clickBound) {
-              this.dataset.clickBound = '1';
+            if (!this.clickBound) {
+              this.clickBound = true;
               this.addEventListener('click', (e) => {
                 // Allow clicking nested buttons/inputs cleanly unless clicked on this mount
                 if (this.getAttribute('status') === 'loading') return;
@@ -1997,6 +2071,41 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
         const mode = this.getMode();
         const trigger = this.getTrigger();
         const targetSel = this.getAttribute('target');
+        const action = (this.getAttribute('action') || '').trim().toLowerCase();
+
+        if (action === 'back' || action === 'forward') {
+          const histTarget = resolveHistoryTarget(this, targetSel);
+          if (histTarget) {
+            const restored =
+              action === 'back'
+                ? targetHistory.goBack(histTarget, histTarget.innerHTML)
+                : targetHistory.goForward(histTarget, histTarget.innerHTML);
+            if (restored !== null) {
+              restoreTargetHtml(histTarget, restored);
+            }
+          }
+          return;
+        }
+
+        if (mode === 'replace' && trigger === 'click' && !userInput) {
+          const histTarget = resolveHistoryTarget(this, targetSel);
+          if (
+            histTarget &&
+            targetHistory.canGoBack(histTarget) &&
+            isBackNavigationIntent(
+              prompt,
+              this.getAttribute('label') || '',
+              this.textContent || '',
+            )
+          ) {
+            const prevHtml = targetHistory.goBack(histTarget, histTarget.innerHTML);
+            if (prevHtml !== null) {
+              restoreTargetHtml(histTarget, prevHtml);
+              return;
+            }
+          }
+        }
+
         const targetEl = targetSel ? doc.querySelector(targetSel) : null;
         const isSelfReplacingTarget = Boolean(
           targetEl && mode !== 'append' && targetEl.contains(this),
@@ -2013,6 +2122,29 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           if (prevCancel) {
             prevCancel();
             activeTargetCancels.delete(targetEl);
+          }
+        }
+
+        const snapshotBeforeReplace = targetEl && mode !== 'append' ? targetEl.innerHTML : '';
+
+        const canUseCache = Boolean(
+          targetEl &&
+            targetSel &&
+            mode === 'replace' &&
+            !this.hasAttribute('no-cache') &&
+            !this.hasAttribute('refresh'),
+        );
+        const cacheKey = canUseCache
+          ? MountResultCache.buildKey(targetSel!, prompt, userInput)
+          : '';
+        if (canUseCache) {
+          const cachedHtml = mountCache.get(cacheKey);
+          if (cachedHtml !== null) {
+            if (snapshotBeforeReplace) {
+              targetHistory.pushSnapshot(targetEl!, snapshotBeforeReplace);
+            }
+            restoreTargetHtml(targetEl!, cachedHtml);
+            return;
           }
         }
 
@@ -2039,21 +2171,13 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           }
         }
 
-        let appendEntry: HTMLElement | null = null;
-        if (mode === 'append') {
-          const host = targetEl || this;
-          appendEntry = doc.createElement('div');
-          appendEntry.className = 'en-mount-entry';
-          appendEntry.style.display = 'contents';
-          appendEntry.style.animation = 'en-materialize 0.24s ease both';
-          if (userInput && trigger === 'submit') {
-            const userEcho = doc.createElement('en-chat-bubble');
-            userEcho.setAttribute('self', '');
-            userEcho.setAttribute('sender', '你');
-            userEcho.textContent = userInput;
-            host.appendChild(userEcho);
-          }
-          host.appendChild(appendEntry);
+        const appendHost = mode === 'append' ? targetEl || this : null;
+        if (appendHost && userInput && trigger === 'submit') {
+          const userEcho = doc.createElement('en-chat-bubble');
+          userEcho.setAttribute('self', '');
+          userEcho.setAttribute('sender', '你');
+          userEcho.textContent = userInput;
+          appendHost.appendChild(userEcho);
         }
 
         const contextSnippet = (doc.body?.innerText || '').slice(0, 1200);
@@ -2065,20 +2189,6 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           contextSnippet,
           mode,
           ...(targetSampleHtml ? { targetSampleHtml } : {}),
-          onChunk: (htmlSoFar) => {
-            const safePreview = stripScriptsForPreview(htmlSoFar);
-            if (appendEntry) {
-              appendEntry.innerHTML = safePreview;
-            } else if (targetEl) {
-              if (!hasVisibleHtmlContent(safePreview)) return;
-              if (isSelfReplacingTarget) {
-                this.detachedBySelfReplace = true;
-              }
-              targetEl.innerHTML = safePreview;
-            } else {
-              this.streamEl.innerHTML = safePreview;
-            }
-          },
           onDone: (finalHtml) => {
             this.cancelActive = null;
             if (targetEl && cancelFn && activeTargetCancels.get(targetEl) === cancelFn) {
@@ -2086,18 +2196,27 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
             }
             this.streamEl.innerHTML = '';
 
-            if (appendEntry) {
-              appendEntry.innerHTML = finalHtml;
-              executeEmbeddedScripts(doc, appendEntry);
-              if (appendEntry.childNodes.length > 0) {
-                appendEntry.replaceWith(...Array.from(appendEntry.childNodes));
+            if (appendHost) {
+              const tmp = doc.createElement('div');
+              tmp.style.display = 'contents';
+              tmp.innerHTML = finalHtml;
+              appendHost.appendChild(tmp);
+              executeEmbeddedScripts(doc, tmp);
+              if (tmp.childNodes.length > 0) {
+                tmp.replaceWith(...Array.from(tmp.childNodes));
               } else {
-                appendEntry.remove();
+                tmp.remove();
               }
               if (this.isConnected) {
                 this.setAttribute('status', 'idle');
               }
             } else if (targetEl) {
+              if (snapshotBeforeReplace) {
+                targetHistory.pushSnapshot(targetEl, snapshotBeforeReplace);
+              }
+              if (canUseCache && finalHtml.trim()) {
+                mountCache.set(cacheKey, finalHtml);
+              }
               if (isSelfReplacingTarget) {
                 this.detachedBySelfReplace = true;
               }
@@ -2122,8 +2241,12 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
             if (targetEl && cancelFn && activeTargetCancels.get(targetEl) === cancelFn) {
               activeTargetCancels.delete(targetEl);
             }
-            if (appendEntry) {
-              appendEntry.innerHTML = `<div class="en-muted" style="color:#c5221f">生成失败: ${escapeXml(err)}</div>`;
+            if (appendHost) {
+              const errEl = doc.createElement('div');
+              errEl.className = 'en-muted';
+              errEl.style.color = '#c5221f';
+              errEl.textContent = `生成失败: ${err}`;
+              appendHost.appendChild(errEl);
               if (this.isConnected) {
                 this.setAttribute('status', 'idle');
               }
