@@ -1,0 +1,57 @@
+:root {
+  --en-void: #1b2230;
+  --en-bg: #f8f9fa;
+  --en-surface: #ffffff;
+  --en-surface-solid: #f1f3f4;
+  --en-surface-hover: #e8eaed;
+  --en-border: #dadce0;
+  --en-border-strong: #1a73e8;
+  --en-text: #202124;
+  --en-muted: #5f6368;
+  --en-accent: #1a73e8;
+  --en-accent-soft: #e8f0fe;
+  --en-accent-text: #174ea6;
+  --en-accent-2: #1967d2;
+  --en-emerald: #1e8e3e;
+  --en-amber: #f9ab00;
+  --en-danger: #d93025;
+  --en-shelf-bg: rgba(28, 32, 38, 0.82);
+  --en-shelf-pill: rgba(255, 255, 255, 0.12);
+  --en-shelf-pill-hover: rgba(255, 255, 255, 0.2);
+  --en-shelf-text: #f1f3f4;
+  --en-shelf-muted: #9aa0a6;
+  --en-font-sans: 'Google Sans', 'Roboto', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --en-font-mono: 'JetBrains Mono', 'Roboto Mono', 'SF Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --en-shadow-window: 0 12px 36px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.12);
+  --en-shadow-modal: 0 18px 48px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+@keyframes en-materialize {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes en-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes en-progress-indeterminate {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
