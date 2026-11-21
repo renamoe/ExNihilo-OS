@@ -183,6 +183,7 @@ export class SpotlightModal {
     try {
       const list = await chatCompletionJson<CandidateApp[]>(osState.llmConfig, messages, {
         signal: ctrl.signal,
+        temperature: 0.35,
       });
 
       if (ctrl.signal.aborted || this.inputEl.value.trim() !== query) return;
@@ -237,9 +238,10 @@ export class SpotlightModal {
     osState.setSpotlightOpen(false);
     this.callbacks.onLaunchCandidate({
       name: query.length > 24 ? `${query.slice(0, 24)}...` : query,
-      icon: '📦',
+      icon: '✨',
       description: `根据「${query}」实时生成`,
       prompt: query,
+      needsMetadata: true,
     });
   }
 

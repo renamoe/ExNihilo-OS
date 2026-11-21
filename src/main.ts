@@ -63,6 +63,9 @@ async function boot(): Promise<void> {
     const iframe = windowManager.prepareStreamingIframe(app.id);
     if (iframe) {
       void appRuntime.generateAppStream(iframe, app);
+      if (candidate.needsMetadata) {
+        void appRuntime.enrichAppMetadata(app.id, candidate.prompt);
+      }
     }
   };
 

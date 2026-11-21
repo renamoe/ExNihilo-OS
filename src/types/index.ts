@@ -26,6 +26,7 @@ export interface CandidateApp {
   icon: string;
   description: string;
   prompt: string;
+  needsMetadata?: boolean;
 }
 
 export interface WindowInstance {

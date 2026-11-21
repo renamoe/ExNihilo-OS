@@ -71,7 +71,7 @@ export class DesktopView {
   render(): void {
     const apps = Array.from(osState.apps.values());
     const signature = apps
-      .map((a) => `${a.id}:${a.name}:${a.icon}:${a.status}`)
+      .map((a) => `${a.id}:${a.name}:${a.icon}:${a.description}:${a.status}`)
       .join('|');
 
     this.watermarkEl.style.display = apps.length === 0 ? 'flex' : 'none';

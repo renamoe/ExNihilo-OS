@@ -1,7 +1,7 @@
 import guestCss from '../runtime-guest/guest.css?raw';
 import { installGuestKit, type GuestBridge, type GuestMountRequest } from '../runtime-guest/guest-kit';
 import type { AppRecord } from '../types';
-import { StreamFenceStripper, streamChatCompletion } from './llm';
+import { chatCompletionJson, StreamFenceStripper, streamChatCompletion } from './llm';
 import { hasVisibleHtmlContent } from './loading-phrases';
 import { osState } from './os-state';
 
@@ -15,6 +15,7 @@ export interface GenerationProgress {
 }
 import {
   buildAppGenerationMessages,
+  buildAppMetadataMessages,
   buildExtendFeatureMessages,
   buildMountMessages,
 } from './prompts';
@@ -166,6 +167,8 @@ class AppRuntimeManager {
       mountPrompt: req.prompt,
       userInput: req.userInput,
       contextSnippet: req.contextSnippet,
+      mode: req.mode,
+      targetSampleHtml: req.targetSampleHtml,
     });
 
     streamChatCompletion(osState.llmConfig, messages, {
@@ -343,6 +346,53 @@ class AppRuntimeManager {
     } finally {
       this.releaseController(app.id, ctrl);
       this.emitProgress(app.id, null);
+    }
+  }
+
+  async enrichAppMetadata(appId: string, query: string): Promise<void> {
+    const ctrl = this.registerController(appId);
+    try {
+      const meta = await chatCompletionJson<{
+        name?: string;
+        icon?: string;
+        description?: string;
+      }>(osState.llmConfig, buildAppMetadataMessages(query), {
+        signal: ctrl.signal,
+        temperature: 0.3,
+      });
+
+      if (ctrl.signal.aborted) return;
+      const latest = osState.apps.get(appId);
+      if (!latest) return;
+
+      const nextName =
+        typeof meta?.name === 'string' && meta.name.trim()
+          ? meta.name.trim().slice(0, 24)
+          : latest.name;
+      const nextIcon =
+        typeof meta?.icon === 'string' && meta.icon.trim() ? meta.icon.trim() : latest.icon;
+      const nextDescription =
+        typeof meta?.description === 'string' && meta.description.trim()
+          ? meta.description.trim().slice(0, 40)
+          : latest.description;
+
+      if (
+        nextName !== latest.name ||
+        nextIcon !== latest.icon ||
+        nextDescription !== latest.description
+      ) {
+        await osState.upsertApp({
+          ...latest,
+          name: nextName,
+          icon: nextIcon,
+          description: nextDescription,
+          updatedAt: Date.now(),
+        });
+      }
+    } catch {
+      // Best-effort metadata enrichment; keep fallback values on error or abort
+    } finally {
+      this.releaseController(appId, ctrl);
     }
   }
 

@@ -1,7 +1,11 @@
+import { hasVisibleHtmlContent } from '../core/loading-phrases';
+
 export interface GuestMountRequest {
   prompt: string;
   userInput?: string;
   contextSnippet: string;
+  mode?: string;
+  targetSampleHtml?: string;
   onChunk: (htmlSoFar: string) => void;
   onDone: (finalHtml: string) => void;
   onError: (err: string) => void;
@@ -195,6 +199,14 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
   } catch {
     // ignore if non-configurable
   }
+
+  // 1b. Prevent <a> navigation inside sandboxed iframe
+  doc.addEventListener('click', (e) => {
+    const target = e.target as Element | null;
+    if (target?.closest?.('a[href]')) {
+      e.preventDefault();
+    }
+  });
 
   // 2. Stray <img> guard (external URLs or broken images -> deterministic Fake Media SVG)
   const sanitizeImg = (img: HTMLImageElement) => {
@@ -1684,6 +1696,8 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
   );
 
   // --- <en-mount> Declarative AI Mount Protocol ---
+  const activeTargetCancels = new WeakMap<Element, () => void>();
+
   defineOnce(
     'en-mount',
     class extends BaseHTMLElement {
@@ -1693,6 +1707,7 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
       private uiEl!: HTMLElement;
       private streamEl!: HTMLElement;
       private cancelActive: (() => void) | null = null;
+      private detachedBySelfReplace = false;
       private io: IntersectionObserver | null = null;
       private visibilityHandler = () => this.checkAutoTrigger();
 
@@ -1803,6 +1818,12 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
         `;
         this.uiEl = root.querySelector('.ui')!;
         this.streamEl = root.querySelector('.stream')!;
+        const slotEl = root.querySelector('slot')!;
+        slotEl.addEventListener('slotchange', () => {
+          if (this.isConnected) {
+            this.renderUi();
+          }
+        });
       }
 
       connectedCallback() {
@@ -1825,7 +1846,7 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           this.io.disconnect();
           this.io = null;
         }
-        if (this.cancelActive) {
+        if (this.cancelActive && !this.detachedBySelfReplace) {
           this.cancelActive();
           this.cancelActive = null;
         }
@@ -1948,6 +1969,7 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
                 if (this.getAttribute('status') === 'loaded' && this.getMode() === 'replace' && !this.getAttribute('target')) {
                   return;
                 }
+                e.preventDefault();
                 e.stopPropagation();
                 this.invokeMount();
               });
@@ -1976,19 +1998,53 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
         const trigger = this.getTrigger();
         const targetSel = this.getAttribute('target');
         const targetEl = targetSel ? doc.querySelector(targetSel) : null;
+        const isSelfReplacingTarget = Boolean(
+          targetEl && mode !== 'append' && targetEl.contains(this),
+        );
+
+        this.detachedBySelfReplace = false;
 
         if (this.cancelActive) {
           this.cancelActive();
           this.cancelActive = null;
         }
+        if (targetEl && mode !== 'append') {
+          const prevCancel = activeTargetCancels.get(targetEl);
+          if (prevCancel) {
+            prevCancel();
+            activeTargetCancels.delete(targetEl);
+          }
+        }
 
         this.setAttribute('status', 'loading');
+
+        let targetSampleHtml = '';
+        const sampleContainer =
+          targetEl ||
+          (mode === 'append' ? (this.children.length > 0 ? this : this.parentElement) : null);
+        if (sampleContainer) {
+          const sampleNodes = Array.from(sampleContainer.children)
+            .filter((el) => {
+              if (el === this) return false;
+              const tag = el.tagName.toUpperCase();
+              if (tag === 'EN-MOUNT' || tag === 'SCRIPT' || tag === 'STYLE') return false;
+              if (el.classList.contains('en-mount-entry')) return false;
+              return true;
+            })
+            .slice(-2);
+          if (sampleNodes.length > 0) {
+            targetSampleHtml = stripScriptsForPreview(
+              sampleNodes.map((el) => el.outerHTML).join('\n'),
+            ).slice(0, 1200);
+          }
+        }
 
         let appendEntry: HTMLElement | null = null;
         if (mode === 'append') {
           const host = targetEl || this;
           appendEntry = doc.createElement('div');
           appendEntry.className = 'en-mount-entry';
+          appendEntry.style.display = 'contents';
           appendEntry.style.animation = 'en-materialize 0.24s ease both';
           if (userInput && trigger === 'submit') {
             const userEcho = doc.createElement('en-chat-bubble');
@@ -2002,15 +2058,22 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
 
         const contextSnippet = (doc.body?.innerText || '').slice(0, 1200);
 
-        this.cancelActive = bridge.requestMount({
+        let cancelFn: (() => void) | null = null;
+        cancelFn = bridge.requestMount({
           prompt,
           userInput,
           contextSnippet,
+          mode,
+          ...(targetSampleHtml ? { targetSampleHtml } : {}),
           onChunk: (htmlSoFar) => {
             const safePreview = stripScriptsForPreview(htmlSoFar);
             if (appendEntry) {
               appendEntry.innerHTML = safePreview;
             } else if (targetEl) {
+              if (!hasVisibleHtmlContent(safePreview)) return;
+              if (isSelfReplacingTarget) {
+                this.detachedBySelfReplace = true;
+              }
               targetEl.innerHTML = safePreview;
             } else {
               this.streamEl.innerHTML = safePreview;
@@ -2018,30 +2081,54 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
           },
           onDone: (finalHtml) => {
             this.cancelActive = null;
+            if (targetEl && cancelFn && activeTargetCancels.get(targetEl) === cancelFn) {
+              activeTargetCancels.delete(targetEl);
+            }
             this.streamEl.innerHTML = '';
 
             if (appendEntry) {
               appendEntry.innerHTML = finalHtml;
               executeEmbeddedScripts(doc, appendEntry);
-              this.setAttribute('status', 'idle');
+              if (appendEntry.childNodes.length > 0) {
+                appendEntry.replaceWith(...Array.from(appendEntry.childNodes));
+              } else {
+                appendEntry.remove();
+              }
+              if (this.isConnected) {
+                this.setAttribute('status', 'idle');
+              }
             } else if (targetEl) {
+              if (isSelfReplacingTarget) {
+                this.detachedBySelfReplace = true;
+              }
               targetEl.innerHTML = finalHtml;
               executeEmbeddedScripts(doc, targetEl);
-              this.setAttribute('status', 'idle');
+              if (this.isConnected) {
+                this.setAttribute('status', 'idle');
+              }
               doc.dispatchEvent(new win.CustomEvent('en-visibility-refresh'));
             } else {
               this.innerHTML = finalHtml;
               executeEmbeddedScripts(doc, this);
-              this.setAttribute('status', trigger === 'submit' ? 'idle' : 'loaded');
+              if (this.isConnected) {
+                this.setAttribute('status', trigger === 'submit' ? 'idle' : 'loaded');
+              }
               doc.dispatchEvent(new win.CustomEvent('en-visibility-refresh'));
             }
             bridge.persistDom();
           },
           onError: (err) => {
             this.cancelActive = null;
+            if (targetEl && cancelFn && activeTargetCancels.get(targetEl) === cancelFn) {
+              activeTargetCancels.delete(targetEl);
+            }
             if (appendEntry) {
               appendEntry.innerHTML = `<div class="en-muted" style="color:#c5221f">生成失败: ${escapeXml(err)}</div>`;
-              this.setAttribute('status', 'idle');
+              if (this.isConnected) {
+                this.setAttribute('status', 'idle');
+              }
+            } else if (targetEl && this.detachedBySelfReplace) {
+              targetEl.innerHTML = `<div class="en-error-card"><h3>生成失败</h3><pre>${escapeXml(err)}</pre></div>`;
             } else {
               this.streamEl.innerHTML = '';
               this.setAttribute('status', 'error');
@@ -2050,6 +2137,11 @@ export function installGuestKit(winParam: Window, bridge: GuestBridge): void {
             }
           },
         });
+
+        this.cancelActive = cancelFn;
+        if (targetEl && mode !== 'append') {
+          activeTargetCancels.set(targetEl, cancelFn);
+        }
       }
     },
   );
