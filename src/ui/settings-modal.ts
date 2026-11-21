@@ -13,7 +13,6 @@ interface PresetItem {
 const PRESETS: PresetItem[] = [
   { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', fastModel: 'gpt-4o-mini' },
   { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', fastModel: 'deepseek-chat' },
-  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'google/gemini-2.0-flash-001' },
   {
     label: 'Magpie (Dev Proxy)',
     baseUrl: '/magpie/v1',
