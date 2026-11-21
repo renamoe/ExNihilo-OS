@@ -2,7 +2,17 @@ import guestCss from '../runtime-guest/guest.css?raw';
 import { installGuestKit, type GuestBridge, type GuestMountRequest } from '../runtime-guest/guest-kit';
 import type { AppRecord } from '../types';
 import { StreamFenceStripper, streamChatCompletion } from './llm';
+import { hasVisibleHtmlContent } from './loading-phrases';
 import { osState } from './os-state';
+
+export type GenerationPhase = 'connecting' | 'thinking' | 'streaming';
+
+export interface GenerationProgress {
+  phase: GenerationPhase;
+  chars: number;
+  reasoningChars: number;
+  startedAt: number;
+}
 import {
   buildAppGenerationMessages,
   buildExtendFeatureMessages,
@@ -50,6 +60,31 @@ function executeEmbeddedScripts(doc: Document, container: Element): void {
 
 class AppRuntimeManager {
   private appControllers = new Map<string, Set<AbortController>>();
+  private progressMap = new Map<string, GenerationProgress>();
+  private progressListeners = new Set<(appId: string, progress: GenerationProgress | null) => void>();
+
+  getProgress(appId: string): GenerationProgress | null {
+    return this.progressMap.get(appId) ?? null;
+  }
+
+  subscribeProgress(
+    listener: (appId: string, progress: GenerationProgress | null) => void,
+  ): () => void {
+    this.progressListeners.add(listener);
+    return () => this.progressListeners.delete(listener);
+  }
+
+  private emitProgress(appId: string, progress: GenerationProgress | null): void {
+    if (progress) {
+      this.progressMap.set(appId, { ...progress });
+    } else {
+      this.progressMap.delete(appId);
+    }
+    const snapshot = progress ? { ...progress } : null;
+    for (const listener of this.progressListeners) {
+      listener(appId, snapshot);
+    }
+  }
 
   private registerController(appId: string): AbortController {
     const ctrl = new AbortController();
@@ -208,14 +243,45 @@ class AppRuntimeManager {
       prompt: app.prompt,
     });
 
+    const progress: GenerationProgress = {
+      phase: 'connecting',
+      chars: 0,
+      reasoningChars: 0,
+      startedAt: Date.now(),
+    };
+    let lastEmitTime = Date.now();
+    this.emitProgress(app.id, progress);
+
     try {
       await streamChatCompletion(osState.llmConfig, messages, {
         signal: ctrl.signal,
+        onReasoningToken: (token) => {
+          progress.reasoningChars += token.length;
+          const now = Date.now();
+          if (progress.phase === 'connecting') {
+            progress.phase = 'thinking';
+            lastEmitTime = now;
+            this.emitProgress(app.id, progress);
+          } else if (now - lastEmitTime >= 100) {
+            lastEmitTime = now;
+            this.emitProgress(app.id, progress);
+          }
+        },
         onToken: (token) => {
           const clean = stripper.push(token);
           if (clean) {
             rawHtml += clean;
             doc.write(clean);
+            progress.chars = rawHtml.length;
+            const now = Date.now();
+            if (progress.phase !== 'streaming' && hasVisibleHtmlContent(rawHtml)) {
+              progress.phase = 'streaming';
+              lastEmitTime = now;
+              this.emitProgress(app.id, progress);
+            } else if (now - lastEmitTime >= 100) {
+              lastEmitTime = now;
+              this.emitProgress(app.id, progress);
+            }
           }
         },
       });
@@ -276,6 +342,7 @@ class AppRuntimeManager {
       }
     } finally {
       this.releaseController(app.id, ctrl);
+      this.emitProgress(app.id, null);
     }
   }
 

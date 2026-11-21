@@ -183,6 +183,7 @@ export interface StreamOptions {
   temperature?: number;
   maxTokens?: number;
   onToken: (token: string) => void;
+  onReasoningToken?: (token: string) => void;
 }
 
 async function extractErrorMessage(res: Response): Promise<string> {
@@ -278,7 +279,11 @@ export async function streamChatCompletion(
         try {
           const parsed = JSON.parse(payload) as {
             choices?: Array<{
-              delta?: { content?: string | null };
+              delta?: {
+                content?: string | null;
+                reasoning_content?: string | null;
+                reasoning?: string | null;
+              };
               message?: { content?: string | null };
             }>;
             error?: { message?: string };
@@ -286,6 +291,12 @@ export async function streamChatCompletion(
 
           if (parsed.error?.message) {
             throw new Error(parsed.error.message);
+          }
+
+          const reasoningDelta =
+            parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
+          if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+            options.onReasoningToken?.(reasoningDelta);
           }
 
           const delta = parsed.choices?.[0]?.delta?.content ?? parsed.choices?.[0]?.message?.content;
@@ -309,8 +320,19 @@ export async function streamChatCompletion(
       if (payload && payload !== '[DONE]') {
         try {
           const parsed = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string | null } }>;
+            choices?: Array<{
+              delta?: {
+                content?: string | null;
+                reasoning_content?: string | null;
+                reasoning?: string | null;
+              };
+            }>;
           };
+          const reasoningDelta =
+            parsed.choices?.[0]?.delta?.reasoning_content ?? parsed.choices?.[0]?.delta?.reasoning;
+          if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
+            options.onReasoningToken?.(reasoningDelta);
+          }
           const delta = parsed.choices?.[0]?.delta?.content;
           if (typeof delta === 'string' && delta.length > 0) {
             fullText += delta;

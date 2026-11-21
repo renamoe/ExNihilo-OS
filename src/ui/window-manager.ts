@@ -1,6 +1,12 @@
+import {
+  EXTENDING_PHRASES,
+  LOADING_PHRASES,
+  pickNextPhrase,
+  SPINNER_FRAMES,
+} from '../core/loading-phrases';
 import { osState } from '../core/os-state';
-import { appRuntime } from '../core/runtime';
-import type { WindowInstance } from '../types';
+import { appRuntime, type GenerationProgress } from '../core/runtime';
+import type { AppRecord, WindowInstance } from '../types';
 
 export interface WindowManagerCallbacks {
   onAbortAndDelete: (appId: string) => void;
@@ -20,6 +26,21 @@ interface ManagedWindowDom {
   extendInput: HTMLInputElement;
   extendSubmitBtn: HTMLButtonElement;
   iframe: HTMLIFrameElement;
+  loaderEl: HTMLElement;
+  loaderIconEl: HTMLElement;
+  loaderNameEl: HTMLElement;
+  loaderStarEl: HTMLElement;
+  loaderPhraseEl: HTMLElement;
+  loaderMetaEl: HTMLElement;
+  loaderMode: 'hidden' | 'full' | 'pill';
+  loaderKind: 'generate' | 'extend' | null;
+  loaderStartedAt: number;
+  spinnerFrame: number;
+  currentPhrase: string;
+  spinnerTimer: number;
+  phraseTimer: number;
+  clockTimer: number;
+  lastProgress: GenerationProgress | null;
   confirmTimer: number;
   confirmingDelete: boolean;
   renderedApp: boolean;
@@ -34,6 +55,9 @@ export class WindowManager {
     this.callbacks = callbacks;
     this.element = document.createElement('div');
     this.element.className = 'os-window-layer';
+    appRuntime.subscribeProgress((appId, progress) => {
+      this.updateLoaderForApp(appId, progress);
+    });
   }
 
   /**
@@ -52,6 +76,7 @@ export class WindowManager {
     for (const [appId, dom] of this.managed) {
       if (!osState.windows.has(appId)) {
         if (dom.confirmTimer) window.clearTimeout(dom.confirmTimer);
+        this.stopLoaderTimers(dom);
         dom.root.remove();
         this.managed.delete(appId);
       }
@@ -74,11 +99,11 @@ export class WindowManager {
       this.element.appendChild(dom.root);
     }
 
-    if (!dom.renderedApp && !skipInitialRender) {
+    if (skipInitialRender) {
+      dom.renderedApp = true;
+    } else if (!dom.renderedApp && app.status !== 'generating') {
       dom.renderedApp = true;
       appRuntime.renderSavedApp(dom.iframe, app);
-    } else if (skipInitialRender) {
-      dom.renderedApp = true;
     }
 
     const isActive = osState.activeWindowId === win.appId && !win.minimized;
@@ -131,6 +156,117 @@ export class WindowManager {
       dom.deleteBtn.textContent = '🗑 卸载';
       dom.deleteBtn.title = '从系统删除此应用';
     }
+
+    dom.loaderIconEl.textContent = app.icon || '📦';
+    dom.loaderNameEl.textContent = `正在构建「${app.name}」`;
+    this.syncLoaderState(dom, app, win, appRuntime.getProgress(app.id));
+  }
+
+  private updateLoaderForApp(appId: string, progress: GenerationProgress | null): void {
+    const dom = this.managed.get(appId);
+    const app = osState.apps.get(appId);
+    const win = osState.windows.get(appId);
+    if (!dom || !app || !win) return;
+    this.syncLoaderState(dom, app, win, progress);
+  }
+
+  private stopLoaderTimers(dom: ManagedWindowDom): void {
+    if (dom.spinnerTimer) {
+      window.clearInterval(dom.spinnerTimer);
+      dom.spinnerTimer = 0;
+    }
+    if (dom.phraseTimer) {
+      window.clearInterval(dom.phraseTimer);
+      dom.phraseTimer = 0;
+    }
+    if (dom.clockTimer) {
+      window.clearInterval(dom.clockTimer);
+      dom.clockTimer = 0;
+    }
+  }
+
+  private updateLoaderMeta(dom: ManagedWindowDom): void {
+    const start = dom.lastProgress?.startedAt ?? dom.loaderStartedAt;
+    const elapsed = Math.max(0, (Date.now() - start) / 1000).toFixed(1);
+    if (dom.loaderKind === 'extend') {
+      dom.loaderMetaEl.textContent = `扩展功能中 · ${elapsed}s`;
+      return;
+    }
+    const phase = dom.lastProgress?.phase;
+    if (phase === 'thinking') {
+      dom.loaderMetaEl.textContent = `深度思考中 · ${elapsed}s`;
+    } else if (phase === 'streaming') {
+      dom.loaderMetaEl.textContent = `绘制界面 · ${dom.lastProgress?.chars ?? 0} 字符 · ${elapsed}s`;
+    } else {
+      dom.loaderMetaEl.textContent = `连接模型 · ${elapsed}s`;
+    }
+  }
+
+  private syncLoaderState(
+    dom: ManagedWindowDom,
+    app: AppRecord,
+    win: WindowInstance,
+    progress: GenerationProgress | null,
+  ): void {
+    let nextMode: 'hidden' | 'full' | 'pill' = 'hidden';
+    let nextKind: 'generate' | 'extend' | null = null;
+    if (app.status === 'generating') {
+      nextKind = 'generate';
+      nextMode = progress?.phase === 'streaming' ? 'pill' : 'full';
+    } else if (win.extending) {
+      nextKind = 'extend';
+      nextMode = 'pill';
+    }
+
+    dom.lastProgress = progress;
+
+    if (nextMode === 'hidden') {
+      if (dom.loaderMode !== 'hidden') {
+        dom.loaderMode = 'hidden';
+        dom.loaderKind = null;
+        this.stopLoaderTimers(dom);
+        dom.loaderEl.classList.remove('mode-full', 'mode-pill');
+      }
+      return;
+    }
+
+    const needInit = dom.loaderMode === 'hidden' || dom.loaderKind !== nextKind;
+    dom.loaderMode = nextMode;
+    dom.loaderKind = nextKind;
+    dom.loaderEl.classList.toggle('mode-full', nextMode === 'full');
+    dom.loaderEl.classList.toggle('mode-pill', nextMode === 'pill');
+
+    if (needInit) {
+      this.stopLoaderTimers(dom);
+      const phrases = nextKind === 'extend' ? EXTENDING_PHRASES : LOADING_PHRASES;
+      dom.loaderStartedAt = progress?.startedAt ?? Date.now();
+      dom.spinnerFrame = 0;
+      dom.loaderStarEl.textContent = SPINNER_FRAMES[0];
+      dom.currentPhrase = pickNextPhrase(phrases);
+      dom.loaderPhraseEl.textContent = dom.currentPhrase;
+
+      const appId = win.appId;
+      dom.spinnerTimer = window.setInterval(() => {
+        dom.spinnerFrame = (dom.spinnerFrame + 1) % SPINNER_FRAMES.length;
+        dom.loaderStarEl.textContent = SPINNER_FRAMES[dom.spinnerFrame];
+      }, 110);
+
+      dom.phraseTimer = window.setInterval(() => {
+        const currentWin = osState.windows.get(appId);
+        const pool = currentWin?.extending ? EXTENDING_PHRASES : LOADING_PHRASES;
+        dom.currentPhrase = pickNextPhrase(pool, dom.currentPhrase);
+        dom.loaderPhraseEl.textContent = dom.currentPhrase;
+        dom.loaderPhraseEl.classList.remove('is-swapping');
+        void dom.loaderPhraseEl.offsetWidth;
+        dom.loaderPhraseEl.classList.add('is-swapping');
+      }, 2400);
+
+      dom.clockTimer = window.setInterval(() => {
+        this.updateLoaderMeta(dom);
+      }, 200);
+    }
+
+    this.updateLoaderMeta(dom);
   }
 
   private createWindowDom(win: WindowInstance): ManagedWindowDom {
@@ -159,6 +295,20 @@ export class WindowManager {
       </div>
       <div class="os-window-body">
         <iframe class="os-window-iframe" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+        <div class="os-window-loader" aria-live="polite">
+          <div class="os-loader-card">
+            <div class="os-loader-app-row">
+              <span class="os-loader-app-icon"></span>
+              <span class="os-loader-app-name"></span>
+            </div>
+            <div class="os-loader-status-row">
+              <span class="os-loader-starburst" aria-hidden="true">✳</span>
+              <span class="os-loader-phrase"></span>
+            </div>
+            <div class="os-loader-meta"></div>
+            <div class="os-loader-bar"><div class="os-loader-bar-fill"></div></div>
+          </div>
+        </div>
       </div>
       <div class="os-window-resize"></div>
     `;
@@ -175,6 +325,21 @@ export class WindowManager {
       extendInput: root.querySelector('.os-extend-input')!,
       extendSubmitBtn: root.querySelector('[data-act="extend-submit"]')!,
       iframe: root.querySelector('.os-window-iframe')!,
+      loaderEl: root.querySelector('.os-window-loader')!,
+      loaderIconEl: root.querySelector('.os-loader-app-icon')!,
+      loaderNameEl: root.querySelector('.os-loader-app-name')!,
+      loaderStarEl: root.querySelector('.os-loader-starburst')!,
+      loaderPhraseEl: root.querySelector('.os-loader-phrase')!,
+      loaderMetaEl: root.querySelector('.os-loader-meta')!,
+      loaderMode: 'hidden',
+      loaderKind: null,
+      loaderStartedAt: 0,
+      spinnerFrame: 0,
+      currentPhrase: '',
+      spinnerTimer: 0,
+      phraseTimer: 0,
+      clockTimer: 0,
+      lastProgress: null,
       confirmTimer: 0,
       confirmingDelete: false,
       renderedApp: false,
