@@ -2,11 +2,31 @@ import { testConnection } from '../core/llm';
 import { osState } from '../core/os-state';
 import type { LLMConfig } from '../types';
 
-const PRESETS: Array<{ label: string; baseUrl: string; model: string; fastModel?: string }> = [
+interface PresetItem {
+  label: string;
+  baseUrl: string;
+  model: string;
+  fastModel?: string;
+  getHint?: (origin: string) => string;
+}
+
+const PRESETS: PresetItem[] = [
   { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', fastModel: 'gpt-4o-mini' },
   { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', fastModel: 'deepseek-chat' },
   { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'google/gemini-2.0-flash-001' },
-  { label: 'Magpie (Local)', baseUrl: '/magpie/v1', model: '' },
+  {
+    label: 'Magpie (Dev Proxy)',
+    baseUrl: '/magpie/v1',
+    model: '',
+    getHint: () => '已填入 Magpie 开发代理预设（仅在 npm run dev 下有效），请确认 Model 名称（及如需 Key）后测试或保存。',
+  },
+  {
+    label: 'Magpie (直连 CORS)',
+    baseUrl: 'http://127.0.0.1:3425/v1',
+    model: '',
+    getHint: (origin) =>
+      `已填入 Magpie 直连预设：请在 Magpie「设置 › 网络与共享 › 网页」中添加白名单 ${origin}，并在「网关」页创建网关密钥填入上方 API Key 后测试或保存。`,
+  },
 ];
 
 export interface SettingsModalCallbacks {
@@ -116,11 +136,12 @@ export class SettingsModal {
           this.modelInput.focus();
         }
         this.fastModelInput.value = preset.fastModel || '';
-        if (preset.baseUrl.startsWith('/')) {
-          this.showStatus(
-            `已填入 ${preset.label} 本地代理预设（需在 npm run dev 下使用），请确认 Model 名称（及如需 Key）后测试或保存。`,
-            'info',
-          );
+        if (preset.getHint) {
+          const origin =
+            typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null'
+              ? window.location.origin
+              : 'https://renamoe.github.io';
+          this.showStatus(preset.getHint(origin), 'info');
         } else {
           this.showStatus(`已填入 ${preset.label} 预设，请确认 API Key 后保存。`, 'info');
         }
